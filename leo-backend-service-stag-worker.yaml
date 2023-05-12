@@ -1,0 +1,153 @@
+# This file configures the hello-world app which serves public web traffic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: leo-backend-worker-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: leo-backend-worker-service
+  template:
+    metadata:
+      labels:
+        app: leo-backend-worker-service
+    spec:
+      containers:
+      - name: leo-backend-worker-service-app
+        # Replace $GCLOUD_PROJECT with your project ID
+        image: us.gcr.io/leo-dataplatform/backend-flask-worker
+        # This app listens on port 5000 for web traffic by default.
+        ports:
+        - containerPort: 5000
+        imagePullPolicy: Always
+        env:
+        - name: PORT
+          value: "5000"
+        - name: DATABASE_URI
+          value: "postgres+psycopg2://leonardo:leonardo!@#@127.0.0.1:5432/stag_leonardo_db"
+        - name: GCP_DATA_PLATFORM_PROJECT_ID
+          value: "leo-etl-staging"
+        - name: GCP_PROJECT_ID
+          value: "leo-etl-staging"
+        # CS Charts env vars
+        - name: GCP_PUBSUB_SUBSCRIPTION
+          value: "stag_leo_backend_work_task_sub"
+        - name: GCP_PUBSUB_CS_CHART_TOPIC
+          value: "stag_leo_backend_work_task"
+        # CS crawl error status
+        - name: GCP_PUBSUB_CS_ERROR_SUBSCRIPTION
+          value: "stag_cs_error_webplatform"
+        - name: GCP_PUBSUB_CS_ERROR_TOPIC
+          value: "stag_cs_error"
+        - name: GCP_PUBSUB_CS_ERROR_DELAY
+          value: "300"
+        # CS crawl progress
+        - name: GCP_PUBSUB_CS_PROGRESS_SUBSCRIPTION
+          value: "stag_cs_progress_webplatform"
+        - name: "GCP_PUBSUB_REQUEST_TOPIC"
+          value: "stag_requests"
+        # Scheduler
+        - name: GCP_PUBSUB_SCHEDULE_SUBSCRIPTION
+          value: "stag_cs_schedule_webplatform"
+        - name: GCP_PUBSUB_SCHEDULE_TOPIC
+          value: "stag_cs_schedule"
+        # Validation
+        - name: GCP_WEBAPP_PUBSUB_VALIDATE_COMPANY_DS_TOPIC
+          value: "stag_company_ds"
+        - name: GCP_WEBAPP_PUBSUB_VALIDATE_COMPANY_DS_SUBSCRIPTION
+          value: "stag_company_ds_validation"
+        # Global worker delay time
+        - name: GCP_BQ_TIMEOUT
+          value: "60"
+        - name: BQ_DATASET
+          value: "stag_datamart"
+        - name: BQ_DATASET_DATAMART_CS
+          value: stag_datamart_cs
+        - name: BQ_DATASET_STAGING
+          value: stag_staging
+        - name: LOGGER_NAME
+          value: "leo-backend-service"
+        - name: LOGGER
+          value: "application"
+        - name: ENABLE_CLOUD_LOGGING
+          value: "0"
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "./etc/google/auth/backend-service_account.json"
+        - name: GCP_WEBAPP_SERVICE_ACCOUNT_KEY_PATH
+          value: "./etc/google/auth/gcp-webapp-service-account-key.json"
+        - name: GCP_WEBAPP_PROJECT_ID
+          value: leo-webapp-staging
+        - name: BACKEND_SERVICE_URI
+          value: leo-backend-service
+        - name: BACKEND_SERVICE_URI
+          value: leo-backend-service
+        - name: GCP_PUBSUB_COMPANY_DATASOURCE_SUBSCRIPTION
+          value: stag_company_datasource_progress_master
+        - name: GCP_PUBSUB_COMPANY_DATASOURCE_TOPIC
+          value: stag_company_datasource_progress
+        - name: GCP_DATA_PLATFORM_DATA_WAREHOUSE
+          value: stag_dwh
+        - name: GCP_PUBSUB_COMPANY_DATASOURCE_ERROR_SUBSCRIPTION
+          value: stag_company_datasource_error_master
+        - name: GCP_PUBSUB_COMPANY_DATASOURCE_ERROR_TOPIC
+          value: stag_company_datasource_error
+        # DP's MongoDB infos
+        - name: MONGODB_URI
+          value: "mongodb://23.236.54.38:27017/stag_leo"
+        - name: MONGODB_DB_NAME
+          value: "stag_leo"
+        - name: MONGODB_ROOT_CA
+          value: "./etc/mongodb/certs/root-ca.pem"
+        - name: MONGODB_CLIENT_KEY
+          value: "./etc/mongodb/certs/beservice.pem"
+        - name: URL
+          value: "http://leonardoapi/api/v1/"
+        - name: ADMIN_USERNAME
+          value: "backendadmin1"
+        - name: ADMIN_PASSWORD
+          value: "8B8kdK3gqp3U5hED"
+        - name: SPARKPOST_API_KEY
+          value: "b8cf47799638f7771ed7768881526820716aadc1"
+        - name: CS_URL
+          value: "https://web-stag-leo.tpptechnology.com/analysis"
+      # [START proxy_container]
+      - image: gcr.io/cloudsql-docker/gce-proxy:1.16
+        name: cloudsql-proxy
+        command: ["/cloud_sql_proxy", "--dir=/cloudsql", "-instances=leo-webapp-staging:us-west1:leo-web-application-staging=tcp:5432", "-credential_file=/secrets/cloudsql/credentials.json"]
+        volumeMounts:
+        - name: cloudsql-oauth-credentials
+          mountPath: /secrets/cloudsql
+          readOnly: true
+        - name: ssl-certs
+          mountPath: /etc/ssl/certs
+        - name: cloudsql
+          mountPath: /cloudsql
+      # [END proxy_container]
+      # [START volumes]
+      volumes:
+      - name: cloudsql-oauth-credentials
+        secret:
+          secretName: cloudsql-oauth-credentials
+      - name: ssl-certs
+        hostPath:
+          path: /etc/ssl/certs
+      - name: cloudsql
+        emptyDir: {}
+        # [END volumes]
+
+---
+# The hello service provides a load-balancing proxy over the hello-app
+# pods. By specifying the type as a 'LoadBalancer', Kubernetes Engine will
+# create an external HTTP load balancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: leo-backend-worker-service
+spec:
+  type: NodePort
+  selector:
+    app: leo-backend-worker-service
+  ports:
+  - port: 80
+    targetPort: 5000

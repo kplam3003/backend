@@ -1,0 +1,294 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  # Environemt Variable for docker:dind service explaining to use overlay2 as supporting driver for docker
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  CONTAINER_REGISTRY: "172.16.11.24:5000"
+
+.deploy_dev_script:
+  script:
+    - cd /home/leonardo/devops/dev
+    - docker-compose pull leo-backend-rest-api
+    - docker-compose up -d leo-backend-rest-api
+
+.deploy_dev_worker_script:
+  script:
+    - cd /home/leonardo/devops/dev
+    - docker-compose pull leo-backend-worker
+    - docker-compose up -d leo-backend-worker
+
+test:
+  stage: test
+  before_script:
+    # Set up environment for testing
+    - echo run before_script
+  script:
+    - echo run test script
+  when: manual
+
+################DEPLOY##################
+# FOR API
+1_build_api_dev:
+  stage: build
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD registry.gitlab.com
+    - mkdir -p ./etc/google/auth/
+    - echo $GCLOUD_SERVICE_BIG_QUERY_DEV > ./etc/google/auth/backend-service_account.json
+    - echo $GCP_WEBAPP_SERVICE_ACCOUNT_KEY_DEV | base64 -d > ./etc/google/auth/gcp-webapp-service-account-key.json
+    # Add MongoDB keys to code base
+    - mkdir -p ./etc/mongodb/certs
+    - echo $MGDB_ROOT_CA | base64 -d > ./etc/mongodb/certs/root-ca.pem
+    - echo $MGDB_BE_SERVICE | base64 -d > ./etc/mongodb/certs/beservice.pem
+    - docker build -t $CONTAINER_REGISTRY/leo-webapp/backend-rest-api:dev . -f ./dockerfiles/DockerfileApi
+    - docker push $CONTAINER_REGISTRY/leo-webapp/backend-rest-api:dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^features\/.*$/'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH =~ "develop"'
+      when: on_success
+    - when: never
+
+3_build_api_stag:
+  image: registry.gitlab.com/tpp-leonardo/leo-client-rest-api/docker-cloud-sdk:latest
+  stage: build
+  services:
+    # GitLab CI uses the services keyword to define what docker containers should be linked with your base image. Since we are using docker as our image we'll be using docker:dind i.e. Docker-In-Docker-Image
+    - $CONTAINER_REGISTRY/leo-webapp/docker:19.03.13-dind
+  before_script:
+    # Set up environment for building image
+    - export COMMIT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-8)
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD registry.gitlab.com
+    # Write our GCP big query service account private key into a file
+    # Add service key to code base
+    - mkdir -p ./etc/google/auth/
+    - echo $GCLOUD_SERVICE_BIG_QUERY_STAG > ./etc/google/auth/backend-service_account.json
+    - echo $GCP_WEBAPP_SERVICE_ACCOUNT_KEY_STAG | base64 -d > ./etc/google/auth/gcp-webapp-service-account-key.json
+    # Add MongoDB keys to code base
+    - mkdir -p ./etc/mongodb/certs
+    - echo $MGDB_ROOT_CA_STAG | base64 -d > ./etc/mongodb/certs/root-ca.pem
+    - echo $MGDB_BE_SERVICE_STAG | base64 -d > ./etc/mongodb/certs/beservice.pem
+    # Build our image using docker
+    - docker build -t us.gcr.io/$GCP_PROJECT_ID_STAG/api-$CI_PROJECT_NAME:$COMMIT_SHA . -f ./dockerfiles/DockerfileApi
+    # Write our GCP service account private key into a file
+    - echo $GCLOUD_SERVICE_KEY_STAG | base64 -d > ${HOME}/gcloud-service-key.json
+    # Give access to gcloud project
+    - /google-cloud-sdk/bin/gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json  || die "unable to authenticate service account for gcloud"
+    # Get current projects credentials to access it
+    - /google-cloud-sdk/bin/gcloud container clusters get-credentials $GCP_STAG_CLUSTER_NAME --zone $GCP_STAG_ZONE --project $GCP_PROJECT_ID_STAG
+    # Configure container registry to push using docker
+    - docker login -u _json_key --password-stdin https://us.gcr.io < ${HOME}/gcloud-service-key.json
+    # Push the image using docker
+    - docker push us.gcr.io/$GCP_PROJECT_ID_STAG/api-$CI_PROJECT_NAME:$COMMIT_SHA
+  when: manual
+  only:
+    - /^releases/.*$/
+
+5_build_api_prod:
+  image: registry.gitlab.com/tpp-leonardo/leo-client-rest-api/docker-cloud-sdk:latest
+  stage: build
+  services:
+    # GitLab CI uses the services keyword to define what docker containers should be linked with your base image. Since we are using docker as our image we'll be using docker:dind i.e. Docker-In-Docker-Image
+    - $CONTAINER_REGISTRY/leo-webapp/docker:19.03.13-dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD registry.gitlab.com
+    # Write our GCP big query service account private key into a file
+    # Add service key to code base
+    - mkdir -p ./etc/google/auth/
+    - echo $GCLOUD_SERVICE_BIG_QUERY_PROD | base64 -d > ./etc/google/auth/backend-service_account.json
+    - echo $GCP_WEBAPP_SERVICE_ACCOUNT_KEY_PROD | base64 -d > ./etc/google/auth/gcp-webapp-service-account-key.json
+    # Add MongoDB keys to code base
+    - mkdir -p ./etc/mongodb/certs
+    - echo $MGDB_ROOT_CA_PROD | base64 -d > ./etc/mongodb/certs/root-ca.pem
+    - echo $MGDB_BE_SERVICE_PROD | base64 -d > ./etc/mongodb/certs/beservice.pem
+    # Build our image using docker
+    - docker build -t eu.gcr.io/$GCP_PROJECT_ID_PROD/api-$CI_PROJECT_NAME:latest . -f ./dockerfiles/DockerfileApi
+    # Write our GCP service account private key into a file
+    - echo $GCLOUD_SERVICE_KEY_PROD | base64 -d > ${HOME}/gcloud-service-key.json
+    # Give access to gcloud project
+    - /google-cloud-sdk/bin/gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json  || die "unable to authenticate service account for gcloud"
+    # Get current projects credentials to access it
+    - /google-cloud-sdk/bin/gcloud container clusters get-credentials $GCP_PROD_CLUSTER_NAME --zone $GCP_PROD_ZONE --project $GCP_PROJECT_ID_PROD
+    # Configure container registry to push using docker
+    - docker login -u _json_key --password-stdin https://eu.gcr.io < ${HOME}/gcloud-service-key.json
+    # Push the image using docker
+    - docker push eu.gcr.io/$GCP_PROJECT_ID_PROD/api-$CI_PROJECT_NAME:latest
+  when: manual
+  only:
+    - /^releases/.*$/
+
+# FOR WOKER
+2_build_worker_dev:
+  stage: build
+  services:
+    # GitLab CI uses the services keyword to define what docker containers should be linked with your base image. Since we are using docker as our image we'll be using docker:dind i.e. Docker-In-Docker-Image
+    - $CONTAINER_REGISTRY/leo-webapp/docker:19.03.13-dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD registry.gitlab.com
+    # Write our GCP big query service account private key into a file
+    # Add service key to code base
+    - mkdir -p ./etc/google/auth/
+    - echo $GCLOUD_SERVICE_BIG_QUERY_DEV > ./etc/google/auth/backend-service_account.json
+    - echo $GCP_WEBAPP_SERVICE_ACCOUNT_KEY_DEV | base64 -d > ./etc/google/auth/gcp-webapp-service-account-key.json
+    # Add MongoDB keys to code base
+    - mkdir -p ./etc/mongodb/certs
+    - echo $MGDB_ROOT_CA | base64 -d  > ./etc/mongodb/certs/root-ca.pem
+    - echo $MGDB_BE_SERVICE | base64 -d  > ./etc/mongodb/certs/beservice.pem
+    # Build our image using docker
+    - docker build -t $CONTAINER_REGISTRY/leo-webapp/backend-worker:dev . -f ./dockerfiles/DockerfileWorker
+    - docker push $CONTAINER_REGISTRY/leo-webapp/backend-worker:dev
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^features\/.*$/'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH =~ "develop"'
+      when: on_success
+    - when: never
+
+4_build_worker_stag:
+  image: registry.gitlab.com/tpp-leonardo/leo-client-rest-api/docker-cloud-sdk:latest
+  stage: build
+  services:
+    # GitLab CI uses the services keyword to define what docker containers should be linked with your base image. Since we are using docker as our image we'll be using docker:dind i.e. Docker-In-Docker-Image
+    - $CONTAINER_REGISTRY/leo-webapp/docker:19.03.13-dind
+  before_script:
+    # Set up environment for building image
+    - export COMMIT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-8)
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD registry.gitlab.com
+    # Write our GCP big query service account private key into a file
+    # Add service key to code base
+    - mkdir -p ./etc/google/auth/
+    - echo $GCLOUD_SERVICE_BIG_QUERY_STAG > ./etc/google/auth/backend-service_account.json
+    - echo $GCP_WEBAPP_SERVICE_ACCOUNT_KEY_STAG | base64 -d > ./etc/google/auth/gcp-webapp-service-account-key.json
+    # Add MongoDB keys to code base
+    - mkdir -p ./etc/mongodb/certs
+    - echo $MGDB_ROOT_CA_STAG | base64 -d  > ./etc/mongodb/certs/root-ca.pem
+    - echo $MGDB_BE_SERVICE_STAG | base64 -d  > ./etc/mongodb/certs/beservice.pem
+    # Build our image using docker
+    - docker build -t us.gcr.io/$GCP_PROJECT_ID_STAG/worker-$CI_PROJECT_NAME:$COMMIT_SHA . -f ./dockerfiles/DockerfileWorker
+    # Write our GCP service account private key into a file
+    - echo $GCLOUD_SERVICE_KEY_STAG | base64 -d > ${HOME}/gcloud-service-key.json
+    # Give access to gcloud project
+    - /google-cloud-sdk/bin/gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json  || die "unable to authenticate service account for gcloud"
+    # Get current projects credentials to access it
+    - /google-cloud-sdk/bin/gcloud container clusters get-credentials $GCP_STAG_CLUSTER_NAME --zone $GCP_STAG_ZONE --project $GCP_PROJECT_ID_STAG
+    # Configure container registry to push using docker
+    - docker login -u _json_key --password-stdin https://us.gcr.io < ${HOME}/gcloud-service-key.json
+    # Push the image using docker
+    - docker push us.gcr.io/$GCP_PROJECT_ID_STAG/worker-$CI_PROJECT_NAME:$COMMIT_SHA
+  when: manual
+  only:
+    - /^releases/.*$/
+
+6_build_worker_prod:
+  image: registry.gitlab.com/tpp-leonardo/leo-client-rest-api/docker-cloud-sdk:latest
+  stage: build
+  services:
+    # GitLab CI uses the services keyword to define what docker containers should be linked with your base image. Since we are using docker as our image we'll be using docker:dind i.e. Docker-In-Docker-Image
+    - docker:19.03.13-dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD registry.gitlab.com
+    # Write our GCP big query service account private key into a file
+    # Add service key to code base
+    - mkdir -p ./etc/google/auth/
+    - echo $GCLOUD_SERVICE_BIG_QUERY_PROD | base64 -d > ./etc/google/auth/backend-service_account.json
+    - echo $GCP_WEBAPP_SERVICE_ACCOUNT_KEY_PROD | base64 -d > ./etc/google/auth/gcp-webapp-service-account-key.json
+    # Add MongoDB keys to code base
+    - mkdir -p ./etc/mongodb/certs
+    - echo $MGDB_ROOT_CA_PROD | base64 -d  > ./etc/mongodb/certs/root-ca.pem
+    - echo $MGDB_BE_SERVICE_PROD | base64 -d  > ./etc/mongodb/certs/beservice.pem
+    # Build our image using docker
+    - docker build -t eu.gcr.io/$GCP_PROJECT_ID_PROD/worker-$CI_PROJECT_NAME:latest . -f ./dockerfiles/DockerfileWorker
+    # Write our GCP service account private key into a file
+    - echo $GCLOUD_SERVICE_KEY_PROD | base64 -d > ${HOME}/gcloud-service-key.json
+    # Give access to gcloud project
+    - /google-cloud-sdk/bin/gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json  || die "unable to authenticate service account for gcloud"
+    # Get current projects credentials to access it
+    - /google-cloud-sdk/bin/gcloud container clusters get-credentials $GCP_PROD_CLUSTER_NAME --zone $GCP_PROD_ZONE --project $GCP_PROJECT_ID_PROD
+    # Configure container registry to push using docker
+    - docker login -u _json_key --password-stdin https://eu.gcr.io < ${HOME}/gcloud-service-key.json
+    # Push the image using docker
+    - docker push eu.gcr.io/$GCP_PROJECT_ID_PROD/worker-$CI_PROJECT_NAME:latest
+  when: manual
+  only:
+    - /^releases/.*$/
+
+################DEPLOY##################
+# FOR API
+1_deploy_api_dev:
+  stage: deploy
+  extends: .deploy_dev_script
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^features\/.*$/'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH =~ "develop"'
+      when: on_success
+    - when: never
+  tags:
+    - local-backend-service-deployment
+
+2_deploy_api_stag:
+  image: registry.gitlab.com/tpp-leonardo/leo-client-rest-api/cloud-sdk-kubect:latest
+  stage: deploy
+  variables:
+    KUBE_LATEST_VERSION: "v1.19.3"
+  before_script:
+   # Set up environment for deployment
+   - export COMMIT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-8)
+  script:
+    # Write our GCP service account private key into a file
+    - echo $GCLOUD_SERVICE_KEY_STAG | base64 -d > ${HOME}/gcloud-service-key.json
+    # Give access to gcloud project
+    - gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json  || die "unable to authenticate service account for gcloud"
+    - gcloud container clusters get-credentials $GCP_STAG_CLUSTER_NAME --zone $GCP_STAG_ZONE --project $GCP_PROJECT_ID_STAG
+    - echo CI_PROJECT_NAME $CI_PROJECT_NAME
+    - kubectl version
+    # Run kubectl apply to apply any changes made in env variables, etc
+    - kubectl apply -f leo-backend-service-stag.yaml
+    # Update deployment with new image
+    - kubectl set image deployment leo-backend-service leo-backend-service-app=us.gcr.io/$GCP_PROJECT_ID_STAG/api-$CI_PROJECT_NAME:$COMMIT_SHA
+  when: manual
+  only:
+    - /^releases/.*$/
+
+
+# FOR API
+2_deploy_worker_dev:
+  stage: deploy
+  extends: .deploy_dev_worker_script
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^features\/.*$/'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH =~ "develop"'
+      when: on_success
+    - when: never
+  tags:
+    - local-backend-service-deployment
+
+3_deploy_worker_stag:
+  image: registry.gitlab.com/tpp-leonardo/leo-client-rest-api/cloud-sdk-kubect:latest
+  stage: deploy
+  variables:
+    KUBE_LATEST_VERSION: "v1.19.3"
+  before_script:
+   # Set up environment for deployment
+   - export COMMIT_SHA=$(echo $CI_COMMIT_SHA | cut -c1-8)
+  script:
+    # Write our GCP service account private key into a file
+    - echo $GCLOUD_SERVICE_KEY_STAG | base64 -d > ${HOME}/gcloud-service-key.json
+    # Give access to gcloud project
+    - gcloud auth activate-service-account --key-file ${HOME}/gcloud-service-key.json  || die "unable to authenticate service account for gcloud"
+    - gcloud container clusters get-credentials $GCP_STAG_CLUSTER_NAME --zone $GCP_STAG_ZONE --project $GCP_PROJECT_ID_STAG
+    - echo CI_PROJECT_NAME $CI_PROJECT_NAME
+    - kubectl version
+    # Run kubectl apply to apply any changes made in env variables, etc
+    - kubectl apply -f leo-backend-service-stag-worker.yaml
+    # Update deployment with new image
+    - kubectl set image deployment leo-backend-worker-service leo-backend-worker-service-app=us.gcr.io/$GCP_PROJECT_ID_STAG/worker-$CI_PROJECT_NAME:$COMMIT_SHA
+  when: manual
+  only:
+    - /^releases/.*$/

@@ -1,0 +1,23 @@
+#FROM python:3.7-alpine
+FROM registry.gitlab.com/tpp-leonardo/leo-backend-service/base:latest
+
+COPY requirements.txt .
+
+# RUN  \
+#   apk add --no-cache postgresql-libs && \
+#   apk --no-cache --update add linux-headers build-base python3-dev libffi-dev && \
+#   apk add --no-cache --virtual .build-deps gcc musl-dev postgresql-dev && \
+#   python3 -m pip install -r requirements.txt --no-cache-dir && \
+#   apk --purge del .build-deps
+
+RUN python3 -m pip install -r requirements.txt --no-cache-dir
+
+ENV APP_HOME /app
+WORKDIR $APP_HOME
+COPY . .
+
+RUN export FLASK_DEBUG=1
+
+EXPOSE 5000
+
+CMD ["/bin/sh", "-c" , "gunicorn --bind 0.0.0.0:5000 --workers 5 --threads 3 --limit-request-line 8190 app:app"]
